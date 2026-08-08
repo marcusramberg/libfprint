@@ -29,6 +29,29 @@
 
 #ifdef HAVE_UDEV
 #include <gudev/gudev.h>
+
+static gboolean
+udev_device_has_compatible (GUdevDevice *device, const gchar *compatible)
+{
+  g_autoptr(GUdevDevice) current = g_object_ref (device);
+
+  if (!compatible)
+    return TRUE;
+  while (current)
+    {
+      const gchar *of_compatible = g_udev_device_get_property (current, "OF_COMPATIBLE_0");
+      const gchar *modalias = g_udev_device_get_property (current, "MODALIAS");
+      g_autoptr(GUdevDevice) parent = NULL;
+
+      if (g_strcmp0 (of_compatible, compatible) == 0 ||
+          (modalias && strstr (modalias, compatible)))
+        return TRUE;
+      parent = g_udev_device_get_parent (current);
+      g_set_object (&current, parent);
+    }
+  return FALSE;
+}
+
 #endif
 
 /**
@@ -479,6 +502,7 @@ fp_context_enumerate (FpContext *context)
 
     g_autoptr(GList) spidev_devices = g_udev_client_query_by_subsystem (udev_client, "spidev");
     g_autoptr(GList) hidraw_devices = g_udev_client_query_by_subsystem (udev_client, "hidraw");
+    g_autoptr(GList) misc_devices = g_udev_client_query_by_subsystem (udev_client, "misc");
 
     /* for each potential driver, try to match all requested resources. */
     for (i = 0; i < priv->drivers->len; i++)
@@ -492,7 +516,7 @@ fp_context_enumerate (FpContext *context)
 
         for (entry = cls->id_table; entry->udev_types; entry++)
           {
-            GList *matched_spidev = NULL, *matched_hidraw = NULL;
+            GList *matched_spidev = NULL, *matched_hidraw = NULL, *matched_misc = NULL;
 
             if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV)
               {
@@ -530,6 +554,20 @@ fp_context_enumerate (FpContext *context)
                 if (matched_hidraw == NULL)
                   continue;
               }
+            if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
+              {
+                for (matched_misc = misc_devices; matched_misc; matched_misc = matched_misc->next)
+                  {
+                    const gchar *name = g_udev_device_get_name (matched_misc->data);
+
+                    if (g_strcmp0 (name, entry->misc_name) == 0 &&
+                        udev_device_has_compatible (matched_misc->data,
+                                                    entry->misc_compatible))
+                      break;
+                  }
+                if (matched_misc == NULL)
+                  continue;
+              }
             priv->pending_devices++;
             g_async_initable_new_async (driver,
                                         G_PRIORITY_LOW,
@@ -539,6 +577,8 @@ fp_context_enumerate (FpContext *context)
                                         "fpi-driver-data", entry->driver_data,
                                         "fpi-udev-data-spidev", (matched_spidev ? g_udev_device_get_device_file (matched_spidev->data) : NULL),
                                         "fpi-udev-data-hidraw", (matched_hidraw ? g_udev_device_get_device_file (matched_hidraw->data) : NULL),
+                                        "fpi-udev-data-misc", (matched_misc ? g_udev_device_get_device_file (matched_misc->data) : NULL),
+                                        "fpi-udev-data-misc-sysfs", (matched_misc ? g_udev_device_get_sysfs_path (matched_misc->data) : NULL),
                                         NULL);
             /* remove entries from list to avoid conflicts */
             if (matched_spidev)
@@ -551,12 +591,18 @@ fp_context_enumerate (FpContext *context)
                 g_object_unref (matched_hidraw->data);
                 hidraw_devices = g_list_delete_link (hidraw_devices, matched_hidraw);
               }
+            if (matched_misc)
+              {
+                g_object_unref (matched_misc->data);
+                misc_devices = g_list_delete_link (misc_devices, matched_misc);
+              }
           }
       }
 
     /* free all unused elemnts in both lists */
     g_list_foreach (spidev_devices, (GFunc) g_object_unref, NULL);
     g_list_foreach (hidraw_devices, (GFunc) g_object_unref, NULL);
+    g_list_foreach (misc_devices, (GFunc) g_object_unref, NULL);
   }
 #endif
 

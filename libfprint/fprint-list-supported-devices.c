@@ -29,7 +29,7 @@
 GHashTable *printed = NULL;
 
 static void
-insert_drivers (GList **usb_list, GList **spi_list)
+insert_drivers (GList **usb_list, GList **spi_list, GList **misc_list)
 {
   g_autoptr(GArray) drivers = fpi_get_driver_types ();
   gint i;
@@ -69,6 +69,21 @@ insert_drivers (GList **usb_list, GList **spi_list)
             {
               char *key;
 
+              if (entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_MISC)
+                {
+                  key = g_strdup_printf ("MISC:%s:%s", entry->misc_name,
+                                         entry->misc_compatible ?: "-");
+                  if (g_hash_table_lookup (printed, key) == NULL)
+                    {
+                      g_hash_table_insert (printed, key, GINT_TO_POINTER (1));
+                      *misc_list = g_list_prepend (*misc_list,
+                          g_strdup_printf ("%s | %s | %s\n", entry->misc_name,
+                                           entry->misc_compatible ?: "-", cls->full_name));
+                    }
+                  else
+                    g_free (key);
+                }
+
               /* Need SPI device */
               if ((entry->udev_types & FPI_DEVICE_UDEV_SUBTYPE_SPIDEV) == 0)
                 continue;
@@ -104,6 +119,7 @@ main (int argc, char **argv)
 {
   GList *usb_list = NULL;
   GList *spi_list = NULL;
+  GList *misc_list = NULL;
   GList *l;
 
   setlocale (LC_ALL, "");
@@ -120,7 +136,7 @@ main (int argc, char **argv)
   g_print ("This is a list of supported devices in libfprint's development version. Those drivers might not all be available in the stable, released version. If in doubt, contact your distribution or systems integrator for details.\n");
   g_print ("\n");
 
-  insert_drivers (&usb_list, &spi_list);
+  insert_drivers (&usb_list, &spi_list, &misc_list);
 
   g_print ("## USB devices\n");
   g_print ("\n");
@@ -147,6 +163,15 @@ main (int argc, char **argv)
   g_print ("\n");
 
   g_list_free_full (g_steal_pointer (&spi_list), g_free);
+
+  g_print ("## Platform/misc devices\n\n");
+  g_print ("Device node | Firmware compatible | Driver\n");
+  g_print ("------------ | ------------ | ------------\n");
+  misc_list = g_list_sort (misc_list, (GCompareFunc) g_strcmp0);
+  for (l = misc_list; l != NULL; l = l->next)
+    g_print ("%s", (char *) l->data);
+  g_print ("\n");
+  g_list_free_full (g_steal_pointer (&misc_list), g_free);
 
 
   g_hash_table_destroy (printed);
