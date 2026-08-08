@@ -389,6 +389,13 @@ test('udev-hwdb',
      env: hwdb_envs,
 )
 
+goodix_qsee_proto_test = executable('test-goodix-qsee-proto',
+    'goodix-qsee-proto.c',
+    '../libfprint/drivers/goodixqsee/goodix-qsee-proto.c',
+    include_directories: [root_inc, include_directories('../libfprint')],
+)
+test('goodix-qsee-proto', goodix_qsee_proto_test)
+
 appstreamcli = find_program('appstreamcli', required: false)
 if appstreamcli.found()
     test('metainfo-validate',

@@ -134,6 +134,13 @@ driver_sources = {
         'drivers/goodixmoc/goodix.c',
         'drivers/goodixmoc/goodix_proto.c',
     ),
+    'goodixqsee' : files(
+        'drivers/goodixqsee/goodix-qsee.c',
+        'drivers/goodixqsee/goodix-qsee-proto.c',
+        'drivers/goodixqsee/goodix-qsee-sensor.c',
+        'drivers/goodixqsee/goodix-qsee-transport.c',
+        'drivers/goodixqsee/goodix-qsee-token.c',
+    ),
     'fpcmoc' : files('drivers/fpcmoc/fpc.c'),
     'realtek' : files('drivers/realtek/realtek.c'),
     'focaltech_moc' : files('drivers/focaltech_moc/focaltech_moc.c'),
