@@ -25,6 +25,28 @@ The TEE implementation is discovered by `TEE_IOC_VERSION`, so a fixed
 to `/dev/teeprivN`; that privileged node belongs only to the machine-wide
 supplicant and application loader.
 
+On distributions that install `pam_fprintd.so` without enabling it for GDM,
+add a separate `/etc/pam.d/gdm-fingerprint` service:
+
+```pam
+#%PAM-1.0
+auth       required    pam_fprintd.so
+account    include     base-account
+password   include     base-password
+session    include     base-session
+```
+
+Keep this separate from `gdm-password`. GDM runs password and fingerprint
+authentication in separate workers, so adding fingerprint authentication to a
+shared PAM stack can delay or change unrelated password, SSH, and system
+authentication paths.
+
+The reference platform has been tested through fprintd for enumeration,
+enrollment, duplicate rejection, known-finger verification, single-print
+deletion, cancellation, per-sample retry feedback, and matched finger-ID
+reporting. GNOME login and session unlock have been tested through the separate
+GDM fingerprint PAM service.
+
 Enrollment currently uses the reference platform's challenge-only 69-byte HAT
 fallback.  `GoodixQseeTokenProvider` is the boundary for replacing it with a
 complete Gatekeeper-signed HAT supplied by a separate credential service.  The
