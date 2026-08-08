@@ -12,6 +12,19 @@ listener services.
 Print data contains a protocol-profile number, group ID, and Goodix finger ID.
 Images and templates remain sealed in the configured listener storage.
 
+The stock fprintd systemd sandbox may need a downstream device-policy drop-in:
+
+```ini
+[Service]
+DeviceAllow=/dev/goodix_fp rw
+DeviceAllow=char-tee rw
+```
+
+The TEE implementation is discovered by `TEE_IOC_VERSION`, so a fixed
+`/dev/tee0` or `/dev/tee1` rule is not reliable.  fprintd does not need access
+to `/dev/teeprivN`; that privileged node belongs only to the machine-wide
+supplicant and application loader.
+
 Enrollment currently uses the reference platform's challenge-only 69-byte HAT
 fallback.  `GoodixQseeTokenProvider` is the boundary for replacing it with a
 complete Gatekeeper-signed HAT supplied by a separate credential service.  The
