@@ -279,9 +279,13 @@ capture_operation (FpiDeviceGoodixQsee *self, gboolean enrolling,
       for (drain = 0; drain < IRQ_MAX_DRAIN; drain++)
         {
           struct goodix_qsee_irq_result event;
+          goodix_qsee_prepare_irq (irq);
           if (!invoke (self, 1016, irq, GOODIX_QSEE_IRQ_SIZE, &status, error)) goto out;
           goodix_qsee_parse_irq (irq, &event);
           event.status = status;
+          fp_dbg ("IRQ drain %d: mask=0x%08x operation=%u status=%u group=%u finger=%u remaining=%u",
+                  drain, event.mask, event.operation, event.status,
+                  event.group_id, event.finger_id, event.samples_remaining);
           if (!event.mask) break;
           if (event.mask & IRQ_FINGER_DOWN)
             queue_progress (self, FP_FINGER_STATUS_PRESENT, -1, NULL);
