@@ -4,10 +4,27 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct focaltech_qsee_shm
+{
+  int    id;
+  void  *va;
+  size_t size;
+};
+
 struct focaltech_qsee_tee
 {
   int      fd;
   uint32_t session;
+
+  /*
+   * One shared region for the whole session, not one per command. The
+   * application keeps pointers into this memory across commands -- a capture
+   * asserts outright that the context it is handed is the same region the
+   * client used last time -- so a fresh region per command leaves those
+   * pointers addressing memory the secure world no longer has.
+   */
+  struct focaltech_qsee_shm request;
+  struct focaltech_qsee_shm response;
 };
 
 /*

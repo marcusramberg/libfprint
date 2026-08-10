@@ -24,18 +24,16 @@
  */
 #define REQUEST_CAPACITY 4096
 
-/* The application's log arrives here. Nothing reads it, but it must exist. */
-#define RESPONSE_CAPACITY 0x8040
-
-struct shm
-{
-  int    id;
-  void  *va;
-  size_t size;
-};
+/*
+ * The application writes its own log into this region as it runs, and keeps
+ * writing for as long as a command does. It has to be generous: when a command
+ * never returns, what it managed to write before it died is the only view the
+ * normal world has into what happened.
+ */
+#define RESPONSE_CAPACITY 0x40000
 
 static int
-shm_alloc (int fd, size_t size, struct shm *out)
+shm_alloc (int fd, size_t size, struct focaltech_qsee_shm *out)
 {
   struct tee_ioctl_shm_alloc_data data = { .size = size };
   int shm_fd;
@@ -92,11 +90,11 @@ focaltech_qsee_tee_open (struct focaltech_qsee_tee *tee, const char *ta_name)
     .buf_ptr = (uintptr_t) &request,
     .buf_len = sizeof (request),
   };
-  struct shm name = { 0 };
+  struct focaltech_qsee_shm name = { 0 };
   size_t length = strlen (ta_name);
 
+  memset (tee, 0, sizeof (*tee));
   tee->fd = -1;
-  tee->session = 0;
 
   if (length >= 64)
     return -1;
@@ -125,6 +123,17 @@ focaltech_qsee_tee_open (struct focaltech_qsee_tee *tee, const char *ta_name)
   tee->session = request.arg.session;
   munmap (name.va, name.size);
 
+  /*
+   * Allocated once, here, for the reason described where the members are
+   * declared: the application remembers this memory between commands.
+   */
+  if (shm_alloc (tee->fd, REQUEST_CAPACITY, &tee->request) ||
+      shm_alloc (tee->fd, RESPONSE_CAPACITY, &tee->response))
+    {
+      focaltech_qsee_tee_close (tee);
+      return -1;
+    }
+
   return 0;
 
 fail:
@@ -140,6 +149,11 @@ focaltech_qsee_tee_close (struct focaltech_qsee_tee *tee)
   if (tee->fd < 0)
     return;
 
+  if (tee->request.va)
+    munmap (tee->request.va, tee->request.size);
+  if (tee->response.va)
+    munmap (tee->response.va, tee->response.size);
+
   if (tee->session)
     {
       struct tee_ioctl_close_session_arg arg = { .session = tee->session };
@@ -148,8 +162,8 @@ focaltech_qsee_tee_close (struct focaltech_qsee_tee *tee)
     }
 
   close (tee->fd);
+  memset (tee, 0, sizeof (*tee));
   tee->fd = -1;
-  tee->session = 0;
 }
 
 int
@@ -168,57 +182,59 @@ focaltech_qsee_tee_invoke (struct focaltech_qsee_tee *tee,
     .buf_ptr = (uintptr_t) &request,
     .buf_len = sizeof (request),
   };
-  struct shm req = { 0 }, rsp = { 0 };
   uint32_t answered;
-  int ret = -1;
 
-  if (tee->fd < 0 || FOCALTECH_QSEE_HEADER_SIZE + payload_size > REQUEST_CAPACITY)
+  if (tee->fd < 0 || !tee->request.va ||
+      FOCALTECH_QSEE_HEADER_SIZE + payload_size > tee->request.size)
     return -1;
 
-  if (shm_alloc (tee->fd, REQUEST_CAPACITY, &req) ||
-      shm_alloc (tee->fd, RESPONSE_CAPACITY, &rsp))
-    goto out;
+  /*
+   * Only what this command owns is cleared. Whatever an earlier command left
+   * further into the region stays, which is what the vendor's client does --
+   * and what the application expects, since it reads back what it stored.
+   */
+  memset (tee->request.va, 0, FOCALTECH_QSEE_HEADER_SIZE + payload_size);
+  memset (tee->response.va, 0, tee->response.size);
 
-  memcpy ((char *) req.va + 0, &command, sizeof (command));
-  memcpy ((char *) req.va + 4, &payload_size, sizeof (uint32_t));
+  memcpy ((char *) tee->request.va + 0, &command, sizeof (command));
+  memcpy ((char *) tee->request.va + 4, &payload_size, sizeof (uint32_t));
   if (payload_size)
-    memcpy ((char *) req.va + FOCALTECH_QSEE_HEADER_SIZE, payload, payload_size);
+    memcpy ((char *) tee->request.va + FOCALTECH_QSEE_HEADER_SIZE, payload,
+            payload_size);
 
+  request.arg.session = tee->session;
   request.arg.num_params = 2;
 
   /*
    * Inout, not input: the application answers in this buffer, and the driver
    * only copies it back when asked this way.
+   *
+   * The length is the region's capacity rather than the message's own: the
+   * application reads it as the buffer it may work in, and refuses a payload
+   * longer than capacity minus the header.
    */
   request.params[0].attr = TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT;
-  request.params[0].b = req.size;
-  request.params[0].c = req.id;
+  request.params[0].b = tee->request.size;
+  request.params[0].c = tee->request.id;
 
   request.params[1].attr = TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_OUTPUT;
-  request.params[1].b = rsp.size;
-  request.params[1].c = rsp.id;
+  request.params[1].b = tee->response.size;
+  request.params[1].c = tee->response.id;
 
   if (ioctl (tee->fd, TEE_IOC_INVOKE, &data) || request.arg.ret)
-    goto out;
+    return -1;
 
   /* Bit 31 set on the command is the application saying it handled this. */
-  memcpy (&answered, req.va, sizeof (answered));
+  memcpy (&answered, tee->request.va, sizeof (answered));
   if (!(answered & FOCALTECH_QSEE_ANSWERED))
-    goto out;
+    return -1;
 
   if (result)
-    memcpy (result, (char *) req.va + 8, sizeof (*result));
+    memcpy (result, (char *) tee->request.va + 8, sizeof (*result));
 
   if (payload_size)
-    memcpy (payload, (char *) req.va + FOCALTECH_QSEE_HEADER_SIZE, payload_size);
+    memcpy (payload, (char *) tee->request.va + FOCALTECH_QSEE_HEADER_SIZE,
+            payload_size);
 
-  ret = 0;
-
-out:
-  if (req.va)
-    munmap (req.va, req.size);
-  if (rsp.va)
-    munmap (rsp.va, rsp.size);
-
-  return ret;
+  return 0;
 }

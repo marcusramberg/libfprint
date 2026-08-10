@@ -97,6 +97,19 @@ ta_error (const char *operation, gint32 result)
 }
 
 /*
+ * A message that never reached the application at all, as opposed to one it
+ * answered badly. Worth keeping apart: they have nothing in common but the
+ * call that reports them, and reading one as the other sends the search for a
+ * cause into the application rather than into the transport.
+ */
+static GError *
+invoke_error (const char *operation)
+{
+  return g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                      "%s: the trusted application never answered", operation);
+}
+
+/*
  * The configuration the application is sent before anything else. Every key
  * here is one it reads with a default of zero, and zero is wrong for all of
  * them: the geometry sizes an allocation it later dereferences, the finger
@@ -183,7 +196,7 @@ command (FpiDeviceFocaltechQsee *self, guint32 cmd, GError **error)
 
   if (focaltech_qsee_tee_invoke (&self->tee, cmd, payload, size, &result))
     {
-      g_propagate_error (error, io_error ("invoke"));
+      g_propagate_error (error, invoke_error ("command"));
       return FALSE;
     }
 
@@ -212,7 +225,7 @@ command_arg (FpiDeviceFocaltechQsee *self, guint32 cmd, guint32 arg,
 
   if (focaltech_qsee_tee_invoke (&self->tee, cmd, payload, size, &result))
     {
-      g_propagate_error (error, io_error ("invoke"));
+      g_propagate_error (error, invoke_error ("command"));
       return FALSE;
     }
 
@@ -232,7 +245,13 @@ sync_config (FpiDeviceFocaltechQsee *self, GError **error)
   gint32 result = 0;
 
   if (focaltech_qsee_tee_invoke (&self->tee, FOCALTECH_QSEE_CMD_SYNC_CONFIG,
-                                 config, strlen (config) + 1, &result) || result)
+                                 config, strlen (config) + 1, &result))
+    {
+      g_propagate_error (error, invoke_error ("sync config"));
+      return FALSE;
+    }
+
+  if (result)
     {
       g_propagate_error (error, ta_error ("sync config", result));
       return FALSE;
@@ -257,7 +276,7 @@ set_active_group (FpiDeviceFocaltechQsee *self, guint32 group, GError **error)
   if (focaltech_qsee_tee_invoke (&self->tee, FOCALTECH_QSEE_CMD_SET_ACTIVE_GROUP,
                                  payload, size, &result))
     {
-      g_propagate_error (error, io_error ("set active group"));
+      g_propagate_error (error, invoke_error ("set active group"));
       return FALSE;
     }
 
@@ -346,7 +365,7 @@ touch_cycle (FpiDeviceFocaltechQsee *self, guint32 event, GError **error)
   if (focaltech_qsee_tee_invoke (&self->tee, FOCALTECH_QSEE_CMD_CAPTURE_IMAGE,
                                  payload, 0x24, &result))
     {
-      g_propagate_error (error, io_error ("capture"));
+      g_propagate_error (error, invoke_error ("capture"));
       return FALSE;
     }
 
@@ -362,7 +381,7 @@ touch_cycle (FpiDeviceFocaltechQsee *self, guint32 event, GError **error)
   if (focaltech_qsee_tee_invoke (&self->tee, FOCALTECH_QSEE_CMD_REPORT_EVENT,
                                  payload, 0x2e0, &result))
     {
-      g_propagate_error (error, io_error ("report event"));
+      g_propagate_error (error, invoke_error ("report event"));
       return FALSE;
     }
 
@@ -385,7 +404,7 @@ enumerate (FpiDeviceFocaltechQsee *self, struct list_result *out, GError **error
   if (focaltech_qsee_tee_invoke (&self->tee, FOCALTECH_QSEE_CMD_ENUMERATE,
                                  payload, sizeof (payload), &result))
     {
-      g_propagate_error (error, io_error ("enumerate"));
+      g_propagate_error (error, invoke_error ("enumerate"));
       return FALSE;
     }
 
