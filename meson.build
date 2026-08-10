@@ -142,6 +142,7 @@ drivers_info = {
     'upekts': {},
     'goodixmoc': {},
     'goodixqsee': { 'helper': ['udev'] },
+    'focaltechqsee': { 'helper': ['udev'] },
     'nb1010': {},
     'fpcmoc': {},
     'realtek': {},
