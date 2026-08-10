@@ -25,6 +25,15 @@
 /* Bringing the sensor up. */
 #define FOCALTECH_QSEE_CMD_INIT         0x1004
 #define FOCALTECH_QSEE_CMD_INIT_SPI     0x1006
+
+/*
+ * FF_CMD_TA_FREE_SPI, as the application names it in its own log. The bus it
+ * opened stays open for as long as the application is loaded -- which outlives
+ * any one client -- and asking it to open a bus it already has returns -5. So a
+ * client that opened the bus has to give it back, or it is the last one that
+ * ever gets it.
+ */
+#define FOCALTECH_QSEE_CMD_FREE_SPI     0x1007
 #define FOCALTECH_QSEE_CMD_SET_SPI_SPEED 0x1008
 #define FOCALTECH_QSEE_CMD_PROBE_DEVICE 0x100a
 #define FOCALTECH_QSEE_CMD_INIT_DEVICE  0x100b
@@ -106,7 +115,13 @@ size_t focaltech_qsee_build_set_active_group (void *payload, size_t size,
 void focaltech_qsee_build_save (void *payload, size_t size, uint32_t what);
 
 /* REMOVE takes the finger id in the first word. */
-void focaltech_qsee_build_remove (void *payload, size_t size, uint32_t finger);
+/*
+ * REMOVE names the finger the way the rest of the storage side does: the group
+ * first, then the finger within it. With the finger alone in the first word the
+ * application answers -200 and deletes nothing.
+ */
+void focaltech_qsee_build_remove (void *payload, size_t size, uint32_t group,
+                                  uint32_t finger);
 
 /*
  * ENUMERATE answers in the request payload: a count, then the finger ids.

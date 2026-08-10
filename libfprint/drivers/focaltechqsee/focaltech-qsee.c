@@ -64,6 +64,12 @@ struct list_result
   guint32 fingers[16];
 };
 
+struct identify_result
+{
+  gboolean matched;
+  guint32  finger;
+};
+
 struct progress_event
 {
   FpiDeviceFocaltechQsee *self;
@@ -94,6 +100,25 @@ ta_error (const char *operation, gint32 result)
   return g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
                       "%s: the trusted application answered %d",
                       operation, result);
+}
+
+/*
+ * The same, for the commands sent by id rather than by name. Bring-up is a
+ * dozen of them in a row and any one can be the one that fails, so the id has
+ * to be in the message -- otherwise every one of them reports the same thing
+ * and the only way to tell them apart is to remove them one at a time.
+ */
+static GError *
+cmd_error (const char *what, uint32_t cmd, gint32 result)
+{
+  if (result)
+    return g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                        "%s 0x%04x: the trusted application answered %d",
+                        what, cmd, result);
+
+  return g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED,
+                      "%s 0x%04x: the trusted application never answered",
+                      what, cmd);
 }
 
 /*
@@ -196,13 +221,13 @@ command (FpiDeviceFocaltechQsee *self, guint32 cmd, GError **error)
 
   if (focaltech_qsee_tee_invoke (&self->tee, cmd, payload, size, &result))
     {
-      g_propagate_error (error, invoke_error ("command"));
+      g_propagate_error (error, cmd_error ("command", cmd, 0));
       return FALSE;
     }
 
   if (result)
     {
-      g_propagate_error (error, ta_error ("command", result));
+      g_propagate_error (error, cmd_error ("command", cmd, result));
       return FALSE;
     }
 
@@ -219,22 +244,26 @@ command_arg (FpiDeviceFocaltechQsee *self, guint32 cmd, guint32 arg,
   gint32 result = 0;
 
   /*
-   * Some commands take less than a word -- PROBE_DEVICE's payload is a single
-   * byte -- so write only as much of the argument as the command's own length
-   * has room for. Sending four bytes for a one-byte command is a length the
-   * application checks before it looks at anything else.
+   * A word, even for PROBE_DEVICE, which the vendor's table gives a single
+   * byte. A word is what it has been seen to accept; whether the byte alone
+   * would do as well has not been established, and the request region is
+   * reused between commands, so the bytes above a short payload are not
+   * reliably zero.
    */
-  memcpy (payload, &arg, size < sizeof (arg) ? size : sizeof (arg));
+  if (size < sizeof (arg))
+    size = sizeof (arg);
+
+  memcpy (payload, &arg, sizeof (arg));
 
   if (focaltech_qsee_tee_invoke (&self->tee, cmd, payload, size, &result))
     {
-      g_propagate_error (error, invoke_error ("command"));
+      g_propagate_error (error, cmd_error ("command", cmd, 0));
       return FALSE;
     }
 
   if (result)
     {
-      g_propagate_error (error, ta_error ("command", result));
+      g_propagate_error (error, cmd_error ("command", cmd, result));
       return FALSE;
     }
 
@@ -292,8 +321,23 @@ bring_up (FpiDeviceFocaltechQsee *self, GError **error)
   if (!sync_config (self, error))
     return FALSE;
 
-  if (!command (self, FOCALTECH_QSEE_CMD_INIT_SPI, error) ||
-      !command_arg (self, FOCALTECH_QSEE_CMD_SET_SPI_SPEED, SPI_SPEED, error) ||
+  /*
+   * The bus can still be held by a client that went away without giving it
+   * back -- killed, or crashed. The application tracks no owner and outlives
+   * every client: it answers -5 to a second INIT_SPI and keeps the bus, which
+   * leaves the sensor unusable until the application itself is reloaded. Take
+   * it back rather than reporting a sensor that is not broken.
+   */
+  if (!command (self, FOCALTECH_QSEE_CMD_INIT_SPI, NULL))
+    {
+      fp_dbg ("the bus was still held; freeing it and taking it again");
+
+      if (!command (self, FOCALTECH_QSEE_CMD_FREE_SPI, error) ||
+          !command (self, FOCALTECH_QSEE_CMD_INIT_SPI, error))
+        return FALSE;
+    }
+
+  if (!command_arg (self, FOCALTECH_QSEE_CMD_SET_SPI_SPEED, SPI_SPEED, error) ||
       !command_arg (self, FOCALTECH_QSEE_CMD_PROBE_DEVICE, 1, error) ||
       !command (self, FOCALTECH_QSEE_CMD_INIT_DEVICE, error) ||
       !command (self, FOCALTECH_QSEE_CMD_INIT, error))
@@ -413,11 +457,12 @@ enumerate (FpiDeviceFocaltechQsee *self, struct list_result *out, GError **error
       return FALSE;
     }
 
-  if (result)
-    {
-      g_propagate_error (error, ta_error ("enumerate", result));
-      return FALSE;
-    }
+  /*
+   * No result check: what ENUMERATE answers with is how many templates it
+   * found, not whether it succeeded. One enrolled finger answers 1, which read
+   * as a status is an error and read as what it is agrees with the count the
+   * payload carries at +0.
+   */
 
   out->count = focaltech_qsee_parse_enumerate (payload, sizeof (payload),
                                                out->fingers,
@@ -506,6 +551,20 @@ do_open (FpiDeviceFocaltechQsee *self, GError **error)
   if (focaltech_qsee_sensor_open (&self->sensor, node))
     {
       g_propagate_error (error, io_error ("open sensor"));
+      return FALSE;
+    }
+
+  /*
+   * Put the sensor back to a known state before the application looks at it.
+   * The chip keeps whatever mode the last client left it in -- scanning, or
+   * watching for a finger -- and the application's probe does not expect that:
+   * it answers -11, the same thing it answers when it cannot reach the bus at
+   * all. Every working invocation of the vendor-facing harness resets first.
+   */
+  if (focaltech_qsee_sensor_reset (&self->sensor))
+    {
+      g_propagate_error (error, io_error ("reset sensor"));
+      focaltech_qsee_sensor_close (&self->sensor);
       return FALSE;
     }
 
@@ -610,18 +669,24 @@ do_enroll (FpiDeviceFocaltechQsee *self, guint32 *finger, GError **error)
 }
 
 static gboolean
-do_identify (FpiDeviceFocaltechQsee *self, guint32 *finger, GError **error)
+do_identify (FpiDeviceFocaltechQsee *self, struct identify_result *out,
+             GError **error)
 {
   struct list_result stored = { 0 };
 
   if (!enumerate (self, &stored, error))
     return FALSE;
 
+  /*
+   * Nothing to match against is an answer, not a failure -- and one that can
+   * be given without asking for a finger. fprintd identifies before it enrols
+   * to see whether the finger is already known, which on an empty device it
+   * cannot be.
+   */
   if (!stored.count)
     {
-      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
-                           "nothing is enrolled");
-      return FALSE;
+      out->matched = FALSE;
+      return TRUE;
     }
 
   /* Arming is all AUTHENTICATE does; the match happens on the event. */
@@ -651,7 +716,8 @@ do_identify (FpiDeviceFocaltechQsee *self, guint32 *finger, GError **error)
       return FALSE;
     }
 
-  *finger = stored.fingers[0];
+  out->matched = TRUE;
+  out->finger = stored.fingers[0];
 
   return TRUE;
 }
@@ -675,6 +741,15 @@ worker_thread (GTask *task, gpointer source, gpointer task_data,
       return;
 
     case WORK_CLOSE:
+      /*
+       * Hand the bus back. The application is loaded once and outlives every
+       * client, so what one client leaves open the next one cannot have: a
+       * second open would fail on INIT_SPI with -5 and the sensor would look
+       * broken until the application itself was reloaded.
+       */
+      if (!command (self, FOCALTECH_QSEE_CMD_FREE_SPI, NULL))
+        fp_dbg ("the application would not take the bus back");
+
       focaltech_qsee_sensor_close (&self->sensor);
       focaltech_qsee_tee_close (&self->tee);
       g_clear_pointer (&self->ta_name, g_free);
@@ -700,7 +775,8 @@ worker_thread (GTask *task, gpointer source, gpointer task_data,
         guint8 payload[8] = { 0 };
         gint32 result = 0;
 
-        focaltech_qsee_build_remove (payload, sizeof (payload), work->finger_id);
+        focaltech_qsee_build_remove (payload, sizeof (payload), GROUP_DEFAULT,
+                                     work->finger_id);
 
         if (focaltech_qsee_tee_invoke (&self->tee, FOCALTECH_QSEE_CMD_REMOVE,
                                        payload, sizeof (payload), &result) ||
@@ -734,15 +810,15 @@ worker_thread (GTask *task, gpointer source, gpointer task_data,
 
     case WORK_IDENTIFY:
       {
-        guint32 *finger = g_new0 (guint32, 1);
+        struct identify_result *identified = g_new0 (struct identify_result, 1);
 
-        if (!do_identify (self, finger, &error))
+        if (!do_identify (self, identified, &error))
           {
-            g_free (finger);
+            g_free (identified);
             break;
           }
 
-        g_task_return_pointer (task, finger, g_free);
+        g_task_return_pointer (task, identified, g_free);
         return;
       }
     }
@@ -853,46 +929,108 @@ enroll_done (GObject *source, GAsyncResult *result, gpointer unused)
   fpi_device_enroll_complete (FP_DEVICE (self), g_object_ref (print), NULL);
 }
 
+/*
+ * Verification and identification are the same work on this sensor -- the
+ * application matches against everything it has stored either way -- but they
+ * are not the same operation to libfprint, and each has to be finished with
+ * its own call. Finishing a verify as if it were an identify trips an
+ * assertion and leaves the operation unfinished, which leaves the device
+ * claimed by a client that has already gone.
+ */
 static void
 identify_done (GObject *source, GAsyncResult *result, gpointer unused)
 {
   FpiDeviceFocaltechQsee *self = FPI_DEVICE_FOCALTECHQSEE (source);
+  FpDevice *device = FP_DEVICE (self);
+  gboolean verifying = fpi_device_get_current_action (device) ==
+                       FPI_DEVICE_ACTION_VERIFY;
   g_autoptr(GError) error = NULL;
-  g_autofree guint32 *finger = NULL;
+  g_autofree struct identify_result *identified = NULL;
   g_autoptr(FpPrint) scan = NULL;
-  GPtrArray *gallery = NULL;
   FpPrint *matched = NULL;
 
   (void) unused;
-  finger = g_task_propagate_pointer (G_TASK (result), &error);
+  identified = g_task_propagate_pointer (G_TASK (result), &error);
 
-  if (!finger)
+  if (!identified)
     {
-      fpi_device_identify_complete (FP_DEVICE (self), g_steal_pointer (&error));
+      /*
+       * A touch the sensor would not take is reported, not returned: it ends
+       * this attempt and asks for another, rather than failing the device.
+       * Anything else is a failure and ends the operation with no report.
+       */
+      if (error->domain != FP_DEVICE_RETRY)
+        {
+          if (verifying)
+            fpi_device_verify_complete (device, g_steal_pointer (&error));
+          else
+            fpi_device_identify_complete (device, g_steal_pointer (&error));
+          return;
+        }
+
+      if (verifying)
+        {
+          fpi_device_verify_report (device, FPI_MATCH_ERROR, NULL,
+                                    g_steal_pointer (&error));
+          fpi_device_verify_complete (device, NULL);
+        }
+      else
+        {
+          fpi_device_identify_report (device, NULL, NULL,
+                                      g_steal_pointer (&error));
+          fpi_device_identify_complete (device, NULL);
+        }
+
       return;
     }
 
-  scan = g_object_ref_sink (make_print (self, GROUP_DEFAULT, *finger));
-  fpi_device_get_identify_data (FP_DEVICE (self), &gallery);
+  if (identified->matched)
+    scan = g_object_ref_sink (make_print (self, GROUP_DEFAULT,
+                                          identified->finger));
 
-  if (gallery)
+  if (verifying)
     {
-      for (guint i = 0; i < gallery->len; i++)
-        {
-          FpPrint *candidate = g_ptr_array_index (gallery, i);
-          guint32 profile, group, id;
+      FpPrint *enrolled = NULL;
+      guint32 profile, group, id;
 
-          if (parse_print (candidate, &profile, &group, &id) &&
-              group == GROUP_DEFAULT && id == *finger)
+      fpi_device_get_verify_data (device, &enrolled);
+
+      /* Exactly one report, whichever way it went: libfprint requires it. */
+      if (scan && enrolled && parse_print (enrolled, &profile, &group, &id) &&
+          group == GROUP_DEFAULT && id == identified->finger)
+        fpi_device_verify_report (device, FPI_MATCH_SUCCESS, scan, NULL);
+      else
+        fpi_device_verify_report (device, FPI_MATCH_FAIL, scan, NULL);
+
+      fpi_device_verify_complete (device, NULL);
+      return;
+    }
+
+  if (scan)
+    {
+      GPtrArray *gallery = NULL;
+
+      fpi_device_get_identify_data (device, &gallery);
+
+      if (gallery)
+        {
+          for (guint i = 0; i < gallery->len; i++)
             {
-              matched = candidate;
-              break;
+              FpPrint *candidate = g_ptr_array_index (gallery, i);
+              guint32 profile, group, id;
+
+              if (parse_print (candidate, &profile, &group, &id) &&
+                  group == GROUP_DEFAULT && id == identified->finger)
+                {
+                  matched = candidate;
+                  break;
+                }
             }
         }
     }
 
-  fpi_device_identify_report (FP_DEVICE (self), matched, scan, NULL);
-  fpi_device_identify_complete (FP_DEVICE (self), NULL);
+  fpi_device_identify_report (device, matched, scan, NULL);
+  fpi_device_identify_complete (device, NULL);
 }
 
 static void

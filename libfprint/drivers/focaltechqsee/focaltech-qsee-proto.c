@@ -29,6 +29,7 @@ focaltech_qsee_payload_size (uint32_t command)
   } sizes[] = {
     { FOCALTECH_QSEE_CMD_INIT, 0 },
     { FOCALTECH_QSEE_CMD_INIT_SPI, 0 },
+    { FOCALTECH_QSEE_CMD_FREE_SPI, 0 },
     { FOCALTECH_QSEE_CMD_SET_SPI_SPEED, 4 },
     { FOCALTECH_QSEE_CMD_PROBE_DEVICE, 1 },
     { FOCALTECH_QSEE_CMD_INIT_DEVICE, 0 },
@@ -114,13 +115,15 @@ focaltech_qsee_build_save (void *payload, size_t size, uint32_t what)
 }
 
 void
-focaltech_qsee_build_remove (void *payload, size_t size, uint32_t finger)
+focaltech_qsee_build_remove (void *payload, size_t size, uint32_t group,
+                             uint32_t finger)
 {
   if (size < 8)
     return;
 
   memset (payload, 0, size);
-  put_u32 (payload, 0, finger);
+  put_u32 (payload, 0, group);
+  put_u32 (payload, 4, finger);
 }
 
 size_t
