@@ -218,10 +218,13 @@ command_arg (FpiDeviceFocaltechQsee *self, guint32 cmd, guint32 arg,
   size_t size = focaltech_qsee_payload_size (cmd);
   gint32 result = 0;
 
-  if (size < sizeof (arg))
-    size = sizeof (arg);
-
-  memcpy (payload, &arg, sizeof (arg));
+  /*
+   * Some commands take less than a word -- PROBE_DEVICE's payload is a single
+   * byte -- so write only as much of the argument as the command's own length
+   * has room for. Sending four bytes for a one-byte command is a length the
+   * application checks before it looks at anything else.
+   */
+  memcpy (payload, &arg, size < sizeof (arg) ? size : sizeof (arg));
 
   if (focaltech_qsee_tee_invoke (&self->tee, cmd, payload, size, &result))
     {
@@ -401,8 +404,10 @@ enumerate (FpiDeviceFocaltechQsee *self, struct list_result *out, GError **error
   guint8 payload[0x40] = { 0 };
   gint32 result = 0;
 
-  if (focaltech_qsee_tee_invoke (&self->tee, FOCALTECH_QSEE_CMD_ENUMERATE,
-                                 payload, sizeof (payload), &result))
+  if (focaltech_qsee_tee_invoke_full (&self->tee, FOCALTECH_QSEE_CMD_ENUMERATE,
+                                      payload,
+                                      focaltech_qsee_payload_size (FOCALTECH_QSEE_CMD_ENUMERATE),
+                                      sizeof (payload), &result))
     {
       g_propagate_error (error, invoke_error ("enumerate"));
       return FALSE;

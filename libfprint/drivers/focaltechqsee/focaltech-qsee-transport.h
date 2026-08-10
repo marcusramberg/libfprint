@@ -48,3 +48,17 @@ int focaltech_qsee_tee_invoke (struct focaltech_qsee_tee *tee,
                                void                      *payload,
                                size_t                     payload_size,
                                int32_t                   *result);
+
+/*
+ * The same, for a command whose answer is longer than what it was sent. The
+ * length in the header is the message's, and the application checks it against
+ * what it expects for that command -- so a command that takes four bytes has
+ * to be sent as four bytes however much room the answer needs. It writes the
+ * answer into the region regardless, which is why the two lengths are separate.
+ */
+int focaltech_qsee_tee_invoke_full (struct focaltech_qsee_tee *tee,
+                                    uint32_t                   command,
+                                    void                      *payload,
+                                    size_t                     send_size,
+                                    size_t                     answer_size,
+                                    int32_t                   *result);

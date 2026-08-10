@@ -173,6 +173,18 @@ focaltech_qsee_tee_invoke (struct focaltech_qsee_tee *tee,
                            size_t                     payload_size,
                            int32_t                   *result)
 {
+  return focaltech_qsee_tee_invoke_full (tee, command, payload, payload_size,
+                                         payload_size, result);
+}
+
+int
+focaltech_qsee_tee_invoke_full (struct focaltech_qsee_tee *tee,
+                                uint32_t                   command,
+                                void                      *payload,
+                                size_t                     send_size,
+                                size_t                     answer_size,
+                                int32_t                   *result)
+{
   struct
   {
     struct tee_ioctl_invoke_arg arg;
@@ -184,8 +196,10 @@ focaltech_qsee_tee_invoke (struct focaltech_qsee_tee *tee,
   };
   uint32_t answered;
 
+  size_t staged = send_size > answer_size ? send_size : answer_size;
+
   if (tee->fd < 0 || !tee->request.va ||
-      FOCALTECH_QSEE_HEADER_SIZE + payload_size > tee->request.size)
+      FOCALTECH_QSEE_HEADER_SIZE + staged > tee->request.size)
     return -1;
 
   /*
@@ -193,14 +207,14 @@ focaltech_qsee_tee_invoke (struct focaltech_qsee_tee *tee,
    * further into the region stays, which is what the vendor's client does --
    * and what the application expects, since it reads back what it stored.
    */
-  memset (tee->request.va, 0, FOCALTECH_QSEE_HEADER_SIZE + payload_size);
+  memset (tee->request.va, 0, FOCALTECH_QSEE_HEADER_SIZE + staged);
   memset (tee->response.va, 0, tee->response.size);
 
   memcpy ((char *) tee->request.va + 0, &command, sizeof (command));
-  memcpy ((char *) tee->request.va + 4, &payload_size, sizeof (uint32_t));
-  if (payload_size)
+  memcpy ((char *) tee->request.va + 4, &send_size, sizeof (uint32_t));
+  if (send_size)
     memcpy ((char *) tee->request.va + FOCALTECH_QSEE_HEADER_SIZE, payload,
-            payload_size);
+            send_size);
 
   request.arg.session = tee->session;
   request.arg.num_params = 2;
@@ -232,9 +246,9 @@ focaltech_qsee_tee_invoke (struct focaltech_qsee_tee *tee,
   if (result)
     memcpy (result, (char *) tee->request.va + 8, sizeof (*result));
 
-  if (payload_size)
+  if (answer_size)
     memcpy (payload, (char *) tee->request.va + FOCALTECH_QSEE_HEADER_SIZE,
-            payload_size);
+            answer_size);
 
   return 0;
 }
