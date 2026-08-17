@@ -90,23 +90,63 @@ void focaltech_qsee_build_event (void *payload, size_t size, uint32_t event);
 
 /*
  * What the application answers a REPORT_EVENT with, written back over the
- * request payload. The vendor HAL reads the same four words and prints them as
- * `enrolled fid = %d, gid = %d, rem = %d`, which is how the layout was found.
+ * request payload.
  *
- * `remaining` is the application's own view of how much of the finger it still
- * needs, and it is not a touch counter: it falls only for a touch that adds
- * coverage the template does not already have. A touch that lands where one
- * already did is accepted and changes nothing.
+ * This is *not* the `enrolled fid = %d, gid = %d, rem = %d` triple the vendor
+ * HAL logs, whatever the reversed notes say: that layout was tried against a
+ * live application and the finger id read back as the event id the request
+ * carried, while the word where `rem` should sit was never written at all.
+ * What actually moves is a pair -- an outcome, and what the application was
+ * armed for when it happened, which is what the outcome has to be read
+ * against:
+ *
+ *	armed = 1 (enrolling)      outcome 1, invoke result 0    sample taken
+ *	armed = 2 (authenticating) outcome 0, invoke result 0    matched
+ *	armed = 2 (authenticating) outcome 2, invoke result -11  no match
+ *
+ * So -11 out of an event is not a failure to report as one: on the matching
+ * path it is the application saying the finger is not one it knows.
+ *
+ * An enrolment answer carries, at +0x24, how much of the finger the
+ * application still wants -- the `rem` of its own `enrolled fid = %u, gid =
+ * %u, rem = %u` log line. It is not a count of touches: it falls only for a
+ * touch that covers part of the finger the template does not have yet, and in
+ * practice about every second touch moves it. An enrolment that stops before
+ * it reaches zero saves a template the application never finished, and an
+ * unfinished template matches nothing -- not even the finger that built it.
+ *
+ * A match also names the finger, at +0x10, with the same id ENUMERATE lists.
+ * The word is written only when there is a match to report -- a refused finger
+ * leaves it at the zero the request carried -- so it means nothing unless the
+ * outcome says the finger was recognised. Further in, from +0x38, sits what
+ * the vendor calls the hw_auth_token; nothing here reads it, and nothing here
+ * should log it.
  */
 struct focaltech_qsee_event_result
 {
-  uint32_t status;              /* +0x00, 1 when the application acted */
-  uint32_t finger;              /* +0x04, the id being enrolled or matched */
-  uint32_t group;               /* +0x08 */
-  uint32_t remaining;           /* +0x0c */
+  uint32_t outcome;             /* +0x00, read against `armed` */
+  uint32_t event;               /* +0x04, the event id sent, echoed back */
+  uint32_t armed;               /* +0x08 */
+  uint32_t reserved;            /* +0x0c, never seen written */
+  uint32_t finger;              /* +0x10, matching only, and only on a match */
+  uint32_t remaining;           /* +0x24, enrolling only */
 };
 
-#define FOCALTECH_QSEE_EVENT_STATUS_OK 1
+/* An enrolment touch the application took a sample from. */
+#define FOCALTECH_QSEE_ENROLL_SAMPLED 1
+
+/*
+ * How a touch came out, when the application was armed for matching. A finger
+ * it does not know is answered rather than refused -- the invocation carries
+ * -11 with it, which is the application's way of saying so and not an error to
+ * report as one.
+ */
+#define FOCALTECH_QSEE_IDENTIFY_MATCHED 0
+#define FOCALTECH_QSEE_IDENTIFY_UNKNOWN 2
+
+/* What `armed` says the application was doing when the event arrived. */
+#define FOCALTECH_QSEE_ARMED_ENROLL   1
+#define FOCALTECH_QSEE_ARMED_IDENTIFY 2
 
 void focaltech_qsee_parse_event (const void                         *payload,
                                  size_t                              size,
@@ -118,6 +158,14 @@ void focaltech_qsee_parse_event (const void                         *payload,
  * an interrupt but takes long enough that a finger placed at a prompt is gone
  * before the sensor samples.
  */
+/*
+ * ENROLL's payload. The application's log names what it is enrolling into --
+ * `FtEnrollByTemplate...finger_id = %d` -- and with the payload left zero that
+ * is slot 0 on every enrolment, so a second finger's samples are merged into
+ * the first finger's template and neither matches afterwards.
+ */
+void focaltech_qsee_build_enroll (void *payload, size_t size, uint32_t slot);
+
 void focaltech_qsee_build_capture (void *payload, size_t size, int hw_reset);
 
 /*

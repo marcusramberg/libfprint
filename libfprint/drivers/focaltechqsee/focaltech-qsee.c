@@ -13,6 +13,7 @@
 #include "drivers_api.h"
 #include "focaltech-qsee.h"
 #include "focaltech-qsee-proto.h"
+#include "focaltech-qsee-transport.h"
 
 #include <errno.h>
 #include <string.h>
@@ -30,21 +31,25 @@
 #define STORE_PATH "/data/vendor_de/0/fpdata"
 
 /*
- * How much of a finger an enrolment asks for, as libfprint counts it: the
- * denominator of the progress the user is shown. The application counts the
- * same requirement down itself in the `remaining` it answers each event with,
- * and that -- not this -- is what ends the enrolment; this only has to agree
- * with the max_enrolling_samples the application is configured with, so the
- * progress moves at the rate the user is told it will.
+ * How many samples an enrolment takes, and so how much of a finger the
+ * template ends up holding -- which is what decides how precisely the finger
+ * has to be placed to unlock afterwards. The sensor is a small strip in the
+ * power button and one touch covers little of a fingertip, so a template built
+ * from few samples matches only the part of the finger that built it.
+ *
+ * The application does not say when it has enough: what it answers an event
+ * with says a sample was taken, not how much of the finger is still missing.
+ * So this is counted here, and it has to agree with the
+ * common.max_enrolling_samples it is configured with -- past that it accepts
+ * nothing more and the enrolment cannot finish.
  */
 #define ENROLL_STAGES 12
 
 /*
- * A touch that adds no coverage is accepted and counted against the
- * application's sample cap without moving `remaining`, so an enrolment can
- * spend touches without making progress. Left alone that is unbounded -- the
- * cap is the application's and it does not say when it is reached -- so give
- * up after this many touches per stage still wanted and say why.
+ * Touches the application refuses do not count, and it will refuse as many as
+ * it is given -- a finger too light or too fast misses its floors every time.
+ * So an enrolment is not allowed to ask forever: this many touches per sample
+ * it wants, and then it says what went wrong rather than standing there.
  */
 #define ENROLL_TOUCHES_PER_STAGE 4
 
@@ -98,6 +103,8 @@ static const FpIdEntry id_table[] = {
     .driver_data = FOCALTECH_QSEE_PROFILE_V1 },
   { .udev_types = 0 }
 };
+
+static void log_ta_output (FpiDeviceFocaltechQsee *self, const char *what);
 
 static GError *
 io_error (const char *operation)
@@ -166,7 +173,7 @@ static const gchar default_config[] =
   "\"device\":{\"preferred_device_id\":\"0x9391\",\"spi_default_bps\":2000000},"
   "\"trustlet\":{\"enable_trusted_enrollment\":false},"
   "\"common\":{\"image_processing_cols\":36,\"image_processing_rows\":144,"
-  "\"max_enrolling_fingers\":5,\"max_enrolling_samples\":8},"
+  "\"max_enrolling_fingers\":5,\"max_enrolling_samples\":12},"
   "\"algorithm\":{\"min_enrolling_quality_threshold\":30,"
   "\"min_enrolling_coverage_threshold\":30,"
   "\"min_identify_quality_threshold\":30,"
@@ -239,6 +246,7 @@ command (FpiDeviceFocaltechQsee *self, guint32 cmd, GError **error)
 
   if (result)
     {
+      log_ta_output (self, "command");
       g_propagate_error (error, cmd_error ("command", cmd, result));
       return FALSE;
     }
@@ -280,6 +288,39 @@ command_arg (FpiDeviceFocaltechQsee *self, guint32 cmd, guint32 arg,
     }
 
   return TRUE;
+}
+
+/*
+ * What the application said while it ran the last command. Its log is a run of
+ * records in the response region -- a tag, then a line naming the function it
+ * was in -- and the readable parts are the whole value of it. Only lines that
+ * carry a message are worth having; the tags repeat on every record and say
+ * nothing on their own.
+ */
+static void
+log_ta_output (FpiDeviceFocaltechQsee *self, const char *what)
+{
+  g_autoptr(GString) line = g_string_new (NULL);
+  const char *log;
+  size_t size = 0;
+
+  log = focaltech_qsee_tee_log (&self->tee, &size);
+  if (!log)
+    return;
+
+  for (size_t i = 0; i < size; i++)
+    {
+      if (g_ascii_isprint (log[i]))
+        {
+          g_string_append_c (line, log[i]);
+          continue;
+        }
+
+      if (line->len > 12 && !g_str_has_prefix (line->str, "focaltech:ta:"))
+        fp_dbg ("%s | %s", what, line->str);
+
+      g_string_truncate (line, 0);
+    }
 }
 
 static gboolean
@@ -394,6 +435,19 @@ touch_cycle (FpiDeviceFocaltechQsee *self, guint32 event,
   if (answer)
     memset (answer, 0, sizeof (*answer));
 
+  /*
+   * Arm finger detection for this touch, every touch. The chip only raises
+   * the interrupt in FDT_DOWN_DETECT, and it does not stay there: the
+   * application puts it back after an event it handled, but a touch that ends
+   * any other way -- a capture the chip would not give an image for, most of
+   * all -- leaves detection off. Nothing then reaches the sensor again and
+   * every following touch waits out its timeout, which looks from outside
+   * like a sensor that has to be hit exactly right.
+   */
+  if (!command_arg (self, FOCALTECH_QSEE_CMD_WORK_MODE,
+                    FOCALTECH_QSEE_MODE_DOWN_DETECT, error))
+    return FALSE;
+
   focaltech_qsee_sensor_drain (&self->sensor);
 
   if (focaltech_qsee_sensor_arm (&self->sensor))
@@ -451,15 +505,15 @@ touch_cycle (FpiDeviceFocaltechQsee *self, guint32 event,
 
   /*
    * The answer is written back over the request payload, so read it before
-   * deciding what the call meant: on a refusal it still says what the
-   * application thinks it needs, and that is the difference between a touch
-   * worth repeating in the same place and one that has to move.
+   * deciding what the call meant. It is only in the log for now: what it says
+   * is the difference between a sample the application took and a finger it
+   * did not recognise, and both already reach the caller through the result.
    */
   focaltech_qsee_parse_event (payload, sizeof (payload), &parsed);
 
-  fp_dbg ("event %u: result %d, status %u, finger %u, group %u, remaining %u",
-          event, result, parsed.status, parsed.finger, parsed.group,
-          parsed.remaining);
+  fp_dbg ("event %u: result %d, outcome %u, armed %u (echo %u, reserved %u)",
+          event, result, parsed.outcome, parsed.armed, parsed.event,
+          parsed.reserved);
 
   if (answer)
     *answer = parsed;
@@ -467,9 +521,11 @@ touch_cycle (FpiDeviceFocaltechQsee *self, guint32 event,
   if (result)
     {
       /*
-       * The application does not say which of its floors the touch missed --
-       * quality or coverage -- and both are asking for the same thing, so the
-       * code goes to the log and the user gets the message that fits either.
+       * Two different things arrive here and neither is a device failure. On
+       * the matching path this is the application saying it does not know the
+       * finger, which it reports as -11; on the enrolling path it is a touch
+       * that missed one of its floors, and it does not say which. Both are
+       * worth another touch, and the code goes to the log.
        */
       g_propagate_error (error,
                          fpi_device_retry_new (FP_DEVICE_RETRY_CENTER_FINGER));
@@ -504,6 +560,13 @@ enumerate (FpiDeviceFocaltechQsee *self, struct list_result *out, GError **error
   out->count = focaltech_qsee_parse_enumerate (payload, sizeof (payload),
                                                out->fingers,
                                                G_N_ELEMENTS (out->fingers));
+
+  for (gsize i = 0; i < out->count; i++)
+    fp_dbg ("enumerate: the application holds finger %u (%zu of %zu)",
+            out->fingers[i], i + 1, out->count);
+
+  if (!out->count)
+    fp_dbg ("enumerate: the application holds nothing");
 
   return TRUE;
 }
@@ -627,26 +690,12 @@ do_open (FpiDeviceFocaltechQsee *self, GError **error)
   return TRUE;
 }
 
-/*
- * Whether the application's answer to an event can be believed. The layout is
- * read from the vendor HAL rather than documented, so a driver that ended an
- * enrolment on it and was wrong would save a template covering a fraction of a
- * finger. An answer that does not look like one is not fatal -- it only costs
- * the progress its `remaining` would have driven, and the enrolment falls back
- * to counting touches, which is what it did before it read this at all.
- */
-static gboolean
-event_answer_is_sane (const struct focaltech_qsee_event_result *answer)
-{
-  return answer->status == FOCALTECH_QSEE_EVENT_STATUS_OK &&
-         answer->remaining < ENROLL_STAGES * ENROLL_TOUCHES_PER_STAGE;
-}
-
 static gboolean
 do_enroll (FpiDeviceFocaltechQsee *self, guint32 *finger, GError **error)
 {
   struct list_result before = { 0 }, after = { 0 };
-  gboolean trust_answer = TRUE;
+  /* Until the application says otherwise, it wants everything. */
+  guint32 remaining = G_MAXUINT32;
   gboolean done = FALSE;
   guint completed = 0;
   guint touches = 0;
@@ -654,6 +703,25 @@ do_enroll (FpiDeviceFocaltechQsee *self, guint32 *finger, GError **error)
   if (!enumerate (self, &before, error))
     return FALSE;
 
+  /*
+   * End whatever enrolment the application still thinks it is in before
+   * starting one. Its enrolment state lives in globals that outlive any
+   * client -- the application is loaded once and held by a separate service,
+   * so a second enrolment meets whatever the first one left behind, and the
+   * template it builds is unusable and takes the earlier finger with it.
+   * Reloading the application between enrolments avoids it; this is that
+   * without the reload.
+   */
+  if (!command (self, FOCALTECH_QSEE_CMD_CANCEL, NULL))
+    fp_dbg ("the application had no enrolment to cancel");
+
+  /*
+   * PRE_ENROLL then ENROLL arms the enrolment; neither takes a finger. The
+   * application allocates the id itself -- `new fid (= %u) generated.` in its
+   * log, from its own rand64 -- and accumulates the samples into a staging
+   * template, which is why its log names finger_id 0 whatever is already
+   * stored.
+   */
   if (!command (self, FOCALTECH_QSEE_CMD_PRE_ENROLL, error) ||
       !command (self, FOCALTECH_QSEE_CMD_ENROLL, error))
     return FALSE;
@@ -666,11 +734,11 @@ do_enroll (FpiDeviceFocaltechQsee *self, guint32 *finger, GError **error)
       if (touches++ >= ENROLL_STAGES * ENROLL_TOUCHES_PER_STAGE)
         {
           g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                       "the application still wanted more of the finger after "
-                       "%u touches; it counts only touches that add coverage, "
-                       "so either the finger was not moved between them or "
-                       "common.max_enrolling_samples is set higher than an "
-                       "enrolment can reach", touches);
+                       "the application still wanted %u more of the finger "
+                       "after %u touches; it counts only touches that cover "
+                       "ground the template does not have, so the finger has "
+                       "to move between them",
+                       remaining, touches);
           return FALSE;
         }
 
@@ -694,31 +762,16 @@ do_enroll (FpiDeviceFocaltechQsee *self, guint32 *finger, GError **error)
           continue;
         }
 
-      if (trust_answer && !event_answer_is_sane (&answer))
-        {
-          fp_dbg ("the event answer does not decode (status %u, remaining %u); "
-                  "counting touches instead", answer.status, answer.remaining);
-          trust_answer = FALSE;
-        }
-
-      if (!trust_answer)
-        {
-          completed++;
-          done = completed >= ENROLL_STAGES;
-          queue_progress (self, FP_FINGER_STATUS_NONE, completed, NULL);
-          continue;
-        }
-
       /*
-       * The application takes every touch it considers good enough, but only
-       * lowers what it still wants for one that covers part of the finger the
-       * template does not have yet. A touch that changes nothing is the common
-       * case once the middle of the pad is learned, and telling the user their
-       * finger was off-centre -- which is what any refusal used to say -- asks
-       * them to do the one thing that cannot help. Ask them to move instead.
+       * The application answers every taken sample with what it still wants.
+       * That is the enrolment's real progress: a sample it took but that
+       * covered nothing new leaves the count where it was, and stopping on a
+       * tally of touches instead saves a template it never finished.
        */
-      if (answer.remaining >= ENROLL_STAGES - completed)
+      if (answer.remaining >= remaining)
         {
+          fp_dbg ("sample taken, still %u to go", answer.remaining);
+
           queue_progress (self, FP_FINGER_STATUS_NONE, completed,
                           fpi_device_retry_new_msg (FP_DEVICE_RETRY_REMOVE_FINGER,
                                                     "That part of your finger is "
@@ -727,8 +780,17 @@ do_enroll (FpiDeviceFocaltechQsee *self, guint32 *finger, GError **error)
           continue;
         }
 
-      completed = ENROLL_STAGES - MIN (answer.remaining, ENROLL_STAGES);
-      done = answer.remaining == 0;
+      remaining = answer.remaining;
+      done = remaining == 0;
+
+      /*
+       * Progress is what the application has left, scaled to the stages the
+       * user was promised. The two agree when ENROLL_STAGES matches the
+       * configured max_enrolling_samples, which is the point of keeping them
+       * the same number.
+       */
+      completed = remaining < ENROLL_STAGES ? ENROLL_STAGES - remaining
+                                            : 1;
 
       queue_progress (self, FP_FINGER_STATUS_NONE, completed, NULL);
     }
@@ -774,7 +836,9 @@ static gboolean
 do_identify (FpiDeviceFocaltechQsee *self, struct identify_result *out,
              GError **error)
 {
+  struct focaltech_qsee_event_result answer = { 0 };
   struct list_result stored = { 0 };
+  g_autoptr(GError) local = NULL;
 
   if (!enumerate (self, &stored, error))
     return FALSE;
@@ -797,35 +861,69 @@ do_identify (FpiDeviceFocaltechQsee *self, struct identify_result *out,
 
   queue_progress (self, FP_FINGER_STATUS_NEEDED, -1, NULL);
 
-  /*
-   * The answer carries the matched id in the same place an enrolment's carries
-   * the id being learned, but nothing here reads it yet: a mis-decoded field
-   * on this path is a false match, not a lost stage, so it stays in the log
-   * until it is confirmed against a device with more than one finger stored.
-   */
-  if (!touch_cycle (self, FOCALTECH_QSEE_EVENT_FINGER_DOWN, NULL, error))
+  if (!touch_cycle (self, FOCALTECH_QSEE_EVENT_FINGER_DOWN, &answer, &local))
     {
       queue_progress (self, FP_FINGER_STATUS_NONE, -1, NULL);
+
+      /*
+       * A finger the application does not know is the answer to an identify,
+       * not a reason to ask for the touch again: it looked, and it says no.
+       * Reporting it as a retry is how an enrolment of a second finger used to
+       * hang -- what runs before one is an identify against everything already
+       * stored, and it cannot succeed until something says "not a match".
+       *
+       * A touch that never reached the application at all leaves the answer as
+       * it was zeroed, so it does not come through here.
+       */
+      if (answer.armed == FOCALTECH_QSEE_ARMED_IDENTIFY &&
+          answer.outcome == FOCALTECH_QSEE_IDENTIFY_UNKNOWN)
+        {
+          out->matched = FALSE;
+          return TRUE;
+        }
+
+      g_propagate_error (error, g_steal_pointer (&local));
       return FALSE;
     }
 
   queue_progress (self, FP_FINGER_STATUS_NONE, -1, NULL);
 
   /*
-   * Which finger matched is not decoded yet, so a match is reported against
-   * the only enrolled finger and refused when there is more than one. Reading
-   * the matched id out of the event's answer is what lifts this.
+   * Getting this far is the application saying it knows the finger -- it
+   * refuses one it does not, and that is reported as a retry rather than
+   * returned here. It names which, so nothing is assumed from how many are
+   * stored.
    */
-  if (stored.count != 1)
+  if (answer.armed != FOCALTECH_QSEE_ARMED_IDENTIFY ||
+      answer.outcome != FOCALTECH_QSEE_IDENTIFY_MATCHED)
     {
-      g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
-                           "matching with more than one finger enrolled needs "
-                           "the matched id decoded from the event");
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "the application took the touch without saying what it "
+                   "matched (outcome %u while armed for %u)",
+                   answer.outcome, answer.armed);
       return FALSE;
     }
 
-  out->matched = TRUE;
-  out->finger = stored.fingers[0];
+  /*
+   * And it has to name one of the fingers it just listed. A word read from the
+   * wrong place would otherwise be a match against a finger that does not
+   * exist, which is the one failure on this path worth refusing outright
+   * rather than reporting.
+   */
+  for (gsize i = 0; i < stored.count; i++)
+    {
+      if (stored.fingers[i] == answer.finger)
+        {
+          out->matched = TRUE;
+          out->finger = answer.finger;
+          return TRUE;
+        }
+    }
+
+  fp_dbg ("the application matched finger %u, which it does not list",
+          answer.finger);
+
+  out->matched = FALSE;
 
   return TRUE;
 }

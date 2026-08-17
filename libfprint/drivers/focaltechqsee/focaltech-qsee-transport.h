@@ -56,6 +56,15 @@ int focaltech_qsee_tee_invoke (struct focaltech_qsee_tee *tee,
  * to be sent as four bytes however much room the answer needs. It writes the
  * answer into the region regardless, which is why the two lengths are separate.
  */
+/*
+ * What the application wrote into its log region during the last command. It
+ * writes there as it runs, naming the function it is in and what it decided,
+ * and it is the only account of why a command came out the way it did -- the
+ * result word says that something failed, never what.
+ */
+const char *focaltech_qsee_tee_log (const struct focaltech_qsee_tee *tee,
+                                    size_t                          *size);
+
 int focaltech_qsee_tee_invoke_full (struct focaltech_qsee_tee *tee,
                                     uint32_t                   command,
                                     void                      *payload,

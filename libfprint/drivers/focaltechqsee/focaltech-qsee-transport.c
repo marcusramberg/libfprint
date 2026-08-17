@@ -166,6 +166,20 @@ focaltech_qsee_tee_close (struct focaltech_qsee_tee *tee)
   tee->fd = -1;
 }
 
+const char *
+focaltech_qsee_tee_log (const struct focaltech_qsee_tee *tee, size_t *size)
+{
+  if (!tee->response.va)
+    {
+      *size = 0;
+      return NULL;
+    }
+
+  *size = tee->response.size;
+
+  return tee->response.va;
+}
+
 int
 focaltech_qsee_tee_invoke (struct focaltech_qsee_tee *tee,
                            uint32_t                   command,

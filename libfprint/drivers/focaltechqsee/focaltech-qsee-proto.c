@@ -81,13 +81,25 @@ focaltech_qsee_parse_event (const void                         *payload,
 {
   memset (out, 0, sizeof (*out));
 
-  if (size < 0x10)
+  if (size < 0x28)
     return;
 
-  out->status = get_u32 (payload, 0x00);
-  out->finger = get_u32 (payload, 0x04);
-  out->group = get_u32 (payload, 0x08);
-  out->remaining = get_u32 (payload, 0x0c);
+  out->outcome = get_u32 (payload, 0x00);
+  out->event = get_u32 (payload, 0x04);
+  out->armed = get_u32 (payload, 0x08);
+  out->reserved = get_u32 (payload, 0x0c);
+  out->finger = get_u32 (payload, 0x10);
+  out->remaining = get_u32 (payload, 0x24);
+}
+
+void
+focaltech_qsee_build_enroll (void *payload, size_t size, uint32_t slot)
+{
+  if (size < 0x4a)
+    return;
+
+  memset (payload, 0, size);
+  put_u32 (payload, 0x00, slot);
 }
 
 void
@@ -158,7 +170,15 @@ focaltech_qsee_parse_enumerate (const void *payload, size_t size,
 
   for (uint32_t i = 0; i < count; i++)
     {
-      size_t offset = 8 + i * sizeof (uint32_t);
+      /*
+       * Eight bytes to an entry, not four: the id, then a word the application
+       * leaves zero. With one finger stored the difference does not show --
+       * the first id sits at +8 either way -- so a stride of four survived
+       * every test until a second finger was enrolled, and then read that
+       * finger's id out of the first one's padding. A store whose second
+       * finger is always 0 is what it looks like from outside.
+       */
+      size_t offset = 8 + i * 8;
 
       if (offset + sizeof (uint32_t) > size)
         break;
