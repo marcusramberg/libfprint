@@ -75,6 +75,22 @@ focaltech_qsee_build_event (void *payload, size_t size, uint32_t event)
 }
 
 void
+focaltech_qsee_parse_event (const void                         *payload,
+                            size_t                              size,
+                            struct focaltech_qsee_event_result *out)
+{
+  memset (out, 0, sizeof (*out));
+
+  if (size < 0x10)
+    return;
+
+  out->status = get_u32 (payload, 0x00);
+  out->finger = get_u32 (payload, 0x04);
+  out->group = get_u32 (payload, 0x08);
+  out->remaining = get_u32 (payload, 0x0c);
+}
+
+void
 focaltech_qsee_build_capture (void *payload, size_t size, int hw_reset)
 {
   if (size < 0x24)

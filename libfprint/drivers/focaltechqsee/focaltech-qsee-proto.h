@@ -89,6 +89,30 @@ size_t focaltech_qsee_payload_size (uint32_t command);
 void focaltech_qsee_build_event (void *payload, size_t size, uint32_t event);
 
 /*
+ * What the application answers a REPORT_EVENT with, written back over the
+ * request payload. The vendor HAL reads the same four words and prints them as
+ * `enrolled fid = %d, gid = %d, rem = %d`, which is how the layout was found.
+ *
+ * `remaining` is the application's own view of how much of the finger it still
+ * needs, and it is not a touch counter: it falls only for a touch that adds
+ * coverage the template does not already have. A touch that lands where one
+ * already did is accepted and changes nothing.
+ */
+struct focaltech_qsee_event_result
+{
+  uint32_t status;              /* +0x00, 1 when the application acted */
+  uint32_t finger;              /* +0x04, the id being enrolled or matched */
+  uint32_t group;               /* +0x08 */
+  uint32_t remaining;           /* +0x0c */
+};
+
+#define FOCALTECH_QSEE_EVENT_STATUS_OK 1
+
+void focaltech_qsee_parse_event (const void                         *payload,
+                                 size_t                              size,
+                                 struct focaltech_qsee_event_result *out);
+
+/*
  * CAPTURE_IMAGE's descriptor, as the vendor HAL fills it. `hw_reset` resets
  * the chip and recalibrates before scanning, which is what the vendor does on
  * an interrupt but takes long enough that a finger placed at a prompt is gone
